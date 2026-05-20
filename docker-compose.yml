@@ -6,7 +6,7 @@ services:
     
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: /run/secrets/mongo-root-password
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb-root-password
 
     secrets:
       - mongodb-root-password
@@ -22,4 +22,4 @@ volumes:
 
 secrets:
   mongodb-root-password:
-    file: ./mongo_root_password.txt
+    file: ./mongodb_root_password.txt

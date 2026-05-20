@@ -11,3 +11,4 @@ wheels/
 mongo_root_password.txt
 
 data/
+mongodb_root_password.txt
