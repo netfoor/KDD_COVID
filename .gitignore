@@ -10,5 +10,5 @@ wheels/
 .venv
 mongo_root_password.txt
 
-data/
+data/*
 mongodb_root_password.txt
