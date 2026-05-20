@@ -1,0 +1,10 @@
+[project]
+name = "covid19"
+authors = [
+    {name = "Fortino Romero Mantilla", email = "2311080254@alumno.utpeubla.edu.mx"}
+]
+version = "0.1.0"
+description = "Covid19 Knowledge Discovery from Data"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
