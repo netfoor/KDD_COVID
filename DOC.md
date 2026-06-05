@@ -109,7 +109,8 @@ covid19/
 │   │   ├── mexico_city_covid_data_complete.parquet
 │   │   ├── mexico_city_covid_data_dates.parquet
 │   │   └── mexico_res_nac_um.parquet
-│   └── mexico_city_covid_final_report.csv         # Producto final
+│   ├── mexico_city_covid_unmapped.csv             # Dataset CDMX con códigos crudos
+│   └── mexico_city_covid_final_report.csv         # Dataset CDMX mapeado (producto final)
 ├── notebooks/
 │   ├── 01_download.ipynb
 │   ├── 02_ingestion.ipynb
@@ -119,7 +120,8 @@ covid19/
 │   ├── 06_statistics.ipynb
 │   ├── 07_death.ipynb
 │   ├── 08_mortality_rate.ipynb
-│   └── 09_csv.ipynb
+│   ├── 09_csv.ipynb
+│   └── 10_load.ipynb
 ├── src/
 │   ├── __init__.py
 │   └── database.py
@@ -170,6 +172,24 @@ Esta colección se construyó en dos etapas que reflejan una decisión de integr
 | mexico_res_nac_um.parquet | EDAD e HIPERTENSION — colección post-integración (RES+NAC+UM, 7,840,211 registros) | 2 |
 | mexico_city_covid_data_complete.parquet | Todos los campos, fechas como String — exportación completa para análisis | 42 |
 | mexico_city_covid_data_dates.parquet | Todos los campos + columnas calculadas de días — estado final para CSV | 45 |
+
+**Capa de Análisis — Colecciones MongoDB finales**
+
+Una vez consolidado el dataset CDMX en Parquet y CSV, ambas versiones se cargan de regreso a MongoDB como colecciones de consulta independientes:
+
+| Colección | Fuente | Registros | Descripción |
+|---|---|---|---|
+| mexico_city_covid_unmapped | Parquet (`mexico_city_covid_data_dates.parquet`) | 7,840,211 | Valores con códigos numéricos originales |
+| mexico_city_covid_mapped | CSV (`mexico_city_covid_final_report.csv`) | 7,840,211 | Valores con descripciones textuales del catálogo |
+
+**Productos CSV**
+
+| Archivo | Fuente | Tamaño | Descripción |
+|---|---|---|---|
+| mexico_city_covid_unmapped.csv | Parquet (datos crudos) | ~946 MB | Códigos numéricos sin mapear |
+| mexico_city_covid_final_report.csv | Parquet + catálogos | ~2,937 MB | Descripciones textuales completas |
+
+La diferencia de tamaño entre ambos CSV (3.1x) se debe exclusivamente al largo de los valores de texto: los 20 campos clínicos pasan de un carácter (`"2"`) a hasta tres (`"NO "`), mientras que columnas como `CLASIFICACION_FINAL_COVID` pasan de un dígito a frases de hasta 65 caracteres. Con 7.8 millones de filas, este efecto suma aproximadamente 2 GB adicionales.
 
 **Producto Final — mexico_city_covid_final_report.csv**
 
@@ -367,8 +387,9 @@ La implementación utiliza el método `.replace()` de Polars en modo lazy, permi
 | restart policy | unless-stopped |
 | Índice principal | ID_REGISTRO (unique) en covid_unified_data |
 | Índice secundario | ENTIDAD_RES en colecciones raw |
-| Tamaño de lote de ingesta | 50,000 documentos por operación bulk_write |
-| Tamaño de lote de exportación | 100,000 documentos por escritura Parquet |
+| Tamaño de lote de ingesta raw | 50,000 documentos por operación bulk_write |
+| Tamaño de lote de exportación Parquet | 100,000 documentos por escritura ParquetWriter |
+| Tamaño de lote de carga final | 50,000 documentos por operación insert_many (notebook 10) |
 
 **Parquet**
 
@@ -399,9 +420,13 @@ El repositorio incluye todos los artefactos del pipeline en distintos estados de
 
 **Datos analíticos intermedios** (`data/polars/*.parquet`): Cuatro archivos Parquet en distintas etapas del pipeline, utilizados como caché entre notebooks para evitar re-procesar la base de datos completa en cada análisis.
 
-**Producto final** (`data/mexico_city_covid_final_report.csv`): CSV con 7,840,211 registros de la CDMX, todas las variables etiquetadas con sus descripciones del catálogo oficial, listo para su uso en herramientas de análisis o minería de datos.
+**Dataset sin mapear** (`data/mexico_city_covid_unmapped.csv`): CSV con 7,840,211 registros en su estado crudo — fechas convertidas a String, columna `_id` eliminada, todos los demás campos con sus códigos numéricos originales. Tamaño aproximado: 946 MB.
 
-El repositorio Git documenta la evolución del pipeline a través de sus commits, desde la descarga inicial hasta el CSV final.
+**Producto final mapeado** (`data/mexico_city_covid_final_report.csv`): CSV con 7,840,211 registros de la CDMX, todas las variables sustituidas por sus descripciones del catálogo oficial SSA. Tamaño: 2,937 MB. Listo para su uso en herramientas de análisis o minería de datos.
+
+**Colecciones MongoDB de consulta** (`mexico_city_covid_unmapped`, `mexico_city_covid_mapped`): Ambas versiones del dataset cargadas en MongoDB para facilitar consultas ad hoc, exploración con MongoDB Compass y documentación visual del estado de los datos antes y después del mapeo.
+
+El repositorio Git documenta la evolución del pipeline a través de sus commits, desde la descarga inicial hasta la carga final en MongoDB.
 
 ---
 
@@ -701,9 +726,68 @@ img: output de verificación mostrando tabla comparativa filas/tamaño Parquet v
 
 ---
 
+### Notebook 10 — Exportación sin Mapear y Carga Final a MongoDB
+
+**Propósito:** Generar el CSV con datos crudos (sin sustitución de catálogos) y cargar ambas versiones del dataset —mapeada y sin mapear— a MongoDB como colecciones de consulta independientes.
+
+**CSV sin mapear — mexico_city_covid_unmapped.csv**
+
+Se lee el Parquet final (`mexico_city_covid_data_dates.parquet`) directamente con Polars lazy, se eliminan la columna `_id` (binario no serializable a CSV) y se convierten las tres columnas de fecha de tipo `Date` nativo a String para compatibilidad con el formato CSV:
+
+```python
+df_unmapped = pl.scan_parquet(parquet_path).drop("_id").with_columns([
+    pl.col("FECHA_DEF").cast(pl.String),
+    pl.col("FECHA_INGRESO").cast(pl.String),
+    pl.col("FECHA_SINTOMAS").cast(pl.String),
+])
+df_unmapped.sink_csv(output_file)
+```
+
+Resultado: 7,840,211 filas, ~946 MB. Todos los campos clínicos y geográficos conservan sus códigos numéricos originales (`"1"`, `"2"`, `"09"`, `"97"`, etc.).
+
+**Por qué el CSV sin mapear pesa menos (946 MB vs 2,937 MB)**
+
+Ambos archivos tienen exactamente las mismas filas y columnas. La diferencia de tamaño es íntegramente consecuencia de la longitud de los valores de texto:
+
+| Columna | Sin mapear | Mapeado |
+|---|---|---|
+| CLASIFICACION_FINAL_COVID | `"7"` (1 char) | `"NEGATIVO A SARS-COV-2"` (22 chars) |
+| RESULTADO_PCR_COINFECCION | `"997"` (3 chars) | `"NO APLICA (CASO SIN MUESTRA)"` (29 chars) |
+| ENTIDAD_RES | `"09"` (2 chars) | `"CIUDAD DE MÉXICO"` (16 chars) |
+| ASMA (×20 columnas médicas) | `"2"` (1 char) | `"NO "` (3 chars) |
+
+Con 7.8 millones de filas y 20 columnas de SI/NO que triplican su longitud, más las columnas de clasificación y entidad que crecen entre 8x y 65x, el total acumulado suma aproximadamente 2 GB adicionales. CSV es texto plano sin compresión, por lo que cada carácter extra se refleja directamente en el tamaño del archivo.
+
+**Carga de ambas versiones a MongoDB**
+
+Se implementó una función genérica `load_to_mongo()` que acepta cualquier LazyFrame de Polars, lo recorre en batches de 50,000 registros y reporta progreso en tiempo real:
+
+```python
+def load_to_mongo(lazy_df, collection, label):
+    total = lazy_df.select(pl.len()).collect()[0, 0]
+    for offset in range(0, total, BATCH_SIZE):
+        batch = lazy_df.slice(offset, BATCH_SIZE).collect()
+        collection.insert_many(batch.to_dicts(), ordered=False)
+```
+
+Cada colección se elimina antes de insertar (`collection.drop()`) para garantizar idempotencia — correr la celda múltiples veces no genera duplicados.
+
+- **mexico_city_covid_unmapped**: cargada desde el Parquet (tipos nativos, fechas como String)
+- **mexico_city_covid_mapped**: cargada desde el CSV final (todos los valores ya como descripciones textuales)
+
+La carga desde Parquet es más rápida que desde CSV porque el formato columnar evita el parseo de texto. La carga del CSV mapeado (2.9 GB) toma considerablemente más tiempo por el tamaño del archivo fuente.
+
+img: captura de MongoDB Compass mostrando las colecciones mexico_city_covid_unmapped y mexico_city_covid_mapped
+
+img: captura de MongoDB Compass mostrando documentos de mexico_city_covid_unmapped (valores crudos)
+
+img: captura de MongoDB Compass mostrando documentos de mexico_city_covid_mapped (descripciones textuales)
+
+---
+
 ## Conclusión
 
-El pipeline desarrollado transforma datos crudos de vigilancia epidemiológica en un conjunto de datos limpio, estandarizado y analíticamente utilizable. El proceso abarca desde la descarga automatizada de 20.9 millones de registros nacionales hasta la generación de un CSV final de 7,840,211 registros de la Ciudad de México, con todos los campos codificados traducidos a sus descripciones textuales oficiales.
+El pipeline desarrollado transforma datos crudos de vigilancia epidemiológica en un conjunto de datos limpio, estandarizado y analíticamente utilizable en múltiples formatos. El proceso abarca desde la descarga automatizada de 20.9 millones de registros nacionales hasta la disponibilidad del dataset final de 7,840,211 registros de la Ciudad de México en cuatro formatos complementarios: colección MongoDB sin mapear, colección MongoDB mapeada, CSV con códigos crudos y CSV con descripciones textuales completas.
 
 Las principales contribuciones del proceso de preparación son:
 
@@ -715,6 +799,36 @@ Las principales contribuciones del proceso de preparación son:
 
 - **Variables de tiempo clínico**: las columnas `DIAS_SINTOMAS`, `DIAS_ATENCION` y `DIAS_ENFERMO` permiten análisis de progresión de la enfermedad que no estaban disponibles en los datos originales.
 
+- **Aprendizaje de arquitectura de procesamiento**: el notebook 06 documenta la evolución desde un uso ineficiente de Polars (cargar datos desde MongoDB en memoria, comportamiento equivalente a Pandas) hasta el uso correcto con evaluación lazy sobre Parquet, reduciendo el consumo de RAM de ~9 GB a valores mínimos.
+
+- **Disponibilidad dual del dataset**: el proyecto entrega el dataset en versión cruda y mapeada tanto en CSV como en MongoDB, permitiendo elegir el nivel de legibilidad vs. compacidad según el caso de uso.
+
 - **Arquitectura reproducible**: el uso de Docker, uv y notebooks numerados garantiza que el pipeline completo puede ejecutarse en cualquier entorno con los mismos resultados.
 
 Los análisis estadísticos preliminares muestran que la población afectada tiene una edad promedio de 38.7 años, con una tasa de mortalidad general del 0.65% sobre la población CDMX, siendo los hombres aproximadamente 1.8 veces más propensos a fallecer que las mujeres por esta causa.
+
+---
+
+## Referencias
+
+Astral. (2024). *uv: An extremely fast Python package and project manager* (Versión 0.x) [Software]. https://github.com/astral-sh/uv
+
+Dirección General de Epidemiología. (2024). *Diccionario de datos: Sistema de vigilancia epidemiológica de enfermedades respiratorias virales — Datos abiertos* [Archivo de datos]. Secretaría de Salud de México.
+
+Dirección General de Epidemiología. (2026). *Datos abiertos — Información referente a casos COVID-19 México (cortes históricos 2020–2026)* [Conjunto de datos]. Secretaría de Salud de México. https://datosabiertos.salud.gob.mx/gobmx/salud/datos_abiertos/datos_abiertos_influenza_covid19.zip
+
+Docker, Inc. (2024). *Docker documentation: Docker Engine* (Versión 8.0) [Software]. https://docs.docker.com/
+
+Hunter, J. D. (2007). Matplotlib: A 2D graphics environment. *Computing in Science & Engineering*, *9*(3), 90–95. https://doi.org/10.1109/MCSE.2007.55
+
+Instituto Nacional de Estadística y Geografía. (2021). *Censo de Población y Vivienda 2020: Principales resultados*. INEGI. https://www.inegi.org.mx/programas/ccpv/2020/
+
+MongoDB, Inc. (2024). *MongoDB manual* (Versión 8.0) [Software]. https://www.mongodb.com/docs/manual/
+
+Python Software Foundation. (2024). *Python* (Versión 3.12) [Software]. https://www.python.org/
+
+The Apache Software Foundation. (2024). *Apache Arrow: A cross-language development platform for in-memory analytics* [Software]. https://arrow.apache.org/
+
+The Pandas Development Team. (2024). *pandas* (Versión 3.0) [Software]. https://pandas.pydata.org/
+
+Vink, R. (2024). *Polars: A fast multi-threaded, hybrid-streaming DataFrame library* (Versión 1.41.0) [Software]. https://github.com/pola-rs/polars
