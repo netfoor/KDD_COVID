@@ -205,3 +205,7 @@ uv add <paquete>
 | Edad promedio de casos CDMX | 38.7 años |
 | Tasa de mortalidad general CDMX | 0.65% |
 | Defunciones CDMX registradas | 59,767 |
+
+## Licencia
+
+MIT. Consulta el archivo `LICENSE`.
